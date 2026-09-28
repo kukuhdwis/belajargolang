@@ -1,0 +1,118 @@
+================================================================================
+PROJECT TITLE: Concurrency in Go - Race Conditions and Synchronization
+PROGRAM TITLE: Concurrent Counter Race Condition & Mutex Resolution
+CAPTION: A practical Go demonstration of a non-deterministic data race between
+         two concurrent goroutines modifying a shared counter without
+         synchronization, alongside a thread-safe solution using sync.Mutex.
+FILES: activity3-1.go (Race Condition) & activity3-2.go (Synchronized Solution)
+================================================================================
+
+
+1. WHAT IS A RACE CONDITION?
+--------------------------------------------------------------------------------
+A race condition is a flaw in concurrent programming where the system's substantive 
+behavior, correctness, or output becomes dependent on the unpredictable sequence, 
+timing, or scheduling of concurrent execution threads (in Go, goroutines).
+
+Specifically, in Go, a "Data Race" occurs when three conditions are simultaneously met:
+  1. Two or more concurrent goroutines access the exact same memory location (variable).
+  2. At least one of these accesses is a WRITE operation.
+  3. The goroutines do not use any synchronization mechanism (such as sync.Mutex, 
+     sync/atomic, or channels) to coordinate their access.
+
+When a race condition exists, the program produces non-deterministic results—meaning 
+subsequent runs of the exact same code with the exact same inputs can yield different, 
+corrupted, or incorrect outputs.
+
+
+2. HOW THE RACE CONDITION OCCURS IN activity3-1.go
+--------------------------------------------------------------------------------
+In `activity3-1.go`, a global variable `counter` is initialized to 0. Two goroutines 
+are launched simultaneously to increment `counter` 10,000 times each.
+
+In Go source code, the increment statement appears as a single line:
+    counter++
+
+However, at the machine/CPU instruction level, `counter++` is NOT an atomic operation. 
+It consists of three separate, discrete operations:
+  Step 1 (Read)   : Load the current value of `counter` from RAM into a CPU register.
+  Step 2 (Modify) : Add 1 to the value held inside the CPU register.
+  Step 3 (Write)  : Store the incremented value from the register back to the memory 
+                    location of `counter`.
+
+Because both goroutines run concurrently on multiple CPU cores without synchronization, 
+the Go runtime scheduler and operating system interleave these three steps arbitrarily.
+
+
+3. STEP-BY-STEP INTERLEAVING TIMELINE (HOW AN UPDATE IS LOST)
+--------------------------------------------------------------------------------
+Assume `counter` is currently at value 10:
+
+Time  | Goroutine 1 (G1)                    | Goroutine 2 (G2)                    | Value in Memory (`counter`)
+------+-------------------------------------+-------------------------------------+---------------------------
+T1    | Reads `counter` (value = 10)        | [Waiting / Executing another step]  | 10
+T2    | [Context switch / CPU core active]  | Reads `counter` (value = 10)        | 10
+T3    | Increments register: 10 + 1 = 11    | Increments register: 10 + 1 = 11    | 10
+T4    | Writes 11 to `counter`              | [Waiting]                           | 11
+T5    | [Waiting]                           | Writes 11 to `counter`              | 11 (Overwrites G1's write!)
+
+Analysis:
+Both Goroutines completed one full increment cycle, which should have brought the 
+counter from 10 to 12. Instead, Goroutine 2 wrote its stale calculation back to 
+memory, completely overwriting and wiping out Goroutine 1's update.
+
+Across 10,000 iterations per goroutine (total 20,000 expected increments), thousands 
+of updates are overwritten and lost. Running `activity3-1.go` yields an actual 
+counter value significantly lower than 20,000 (e.g., 13,972 or 15,420).
+
+
+4. HOW TO DETECT A RACE CONDITION
+--------------------------------------------------------------------------------
+Go includes a built-in race detector powered by ThreadSanitizer.
+You can run any Go program with the race detector enabled using the `-race` flag:
+
+    go run -race activity3-1.go
+
+When a race occurs, Go prints a detailed warning report highlighting the exact lines 
+where concurrent reads and writes clashed without synchronization:
+
+    ==================
+    WARNING: DATA RACE
+    Read at 0x... by goroutine 7:
+      main.increment()
+          activity3-1.go:19
+    Previous write at 0x... by goroutine 6:
+      main.increment()
+          activity3-1.go:19
+    ==================
+
+
+5. HOW TO PREVENT AND RESOLVE THE RACE CONDITION (activity3-2.go)
+--------------------------------------------------------------------------------
+To eliminate the race condition, access to the shared variable must be synchronized 
+so that only one goroutine can read, modify, and write the variable at any given moment.
+
+In `activity3-2.go`, this is solved using `sync.Mutex`:
+
+    var mutex sync.Mutex
+
+    func safeIncrement(wg *sync.WaitGroup) {
+        defer wg.Done()
+        for i := 0; i < 10000; i++ {
+            mutex.Lock()   // Acquire exclusive lock (Critical Section Begins)
+            counter++      // Guaranteed to execute without concurrent interference
+            mutex.Unlock() // Release lock (Critical Section Ends)
+        }
+    }
+
+By locking the mutex before entering the critical section and unlocking it immediately 
+after, the three steps (Read -> Modify -> Write) behave as a single uninterrupted, 
+mutually exclusive block.
+
+Alternative methods to prevent race conditions in Go include:
+  1. Atomic Operations (`sync/atomic`):
+     e.g., `atomic.AddInt64(&counter, 1)` uses CPU-level atomic hardware instructions.
+  2. Channels (Communicating Sequential Processes - CSP):
+     Follow Go's philosophy: "Do not communicate by sharing memory; instead, 
+     share memory by communicating." Passing data through channels serializes access 
+     without explicit locks.
